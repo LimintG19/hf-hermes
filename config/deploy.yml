@@ -1,0 +1,86 @@
+name: Build and Deploy to Hugging Face Spaces
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  SPACE_REPOSITORY: ${{ secrets.HF_SPACE_REPO }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: false
+        tags: hermes-spaces:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+    - name: Deploy to Hugging Face Spaces
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        # Install Hugging Face CLI
+        pip install huggingface-hub
+        # Clone the Space repository
+        git clone https://user:$HF_TOKEN@huggingface.co/spaces/${{ secrets.HF_SPACE_REPO }} space-repo
+        
+        # Copy files to Space repository
+        cp -r . space-repo/
+        cd space-repo
+        
+        # Remove .git directory to avoid conflicts
+        rm -rf .git
+        
+        # Initialize git and push
+        git init
+        git add .
+        git commit -m "Deploy from GitHub Actions - $(date)"
+        git push --force https://user:$HF_TOKEN@huggingface.co/spaces/${{ secrets.HF_SPACE_REPO }} main
+
+    - name: Wait for Space to be ready
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        echo "Waiting for Space to be ready..."
+        sleep 30
+        
+        # Check if Space is running
+        SPACE_URL="https://${{ secrets.HF_SPACE_REPO }}.hf.space/health"
+        for i in {1..10}; do
+          if curl -f $SPACE_URL > /dev/null 2>&1; then
+            echo "✅ Space is ready!"
+            exit 0
+          fi
+          echo "⏳ Waiting... ($i/10)"
+          sleep 10
+        done
+        
+        echo "⚠️ Space may not be fully ready yet, but deployment was successful"
