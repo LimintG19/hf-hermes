@@ -4,6 +4,11 @@ LABEL maintainer="Hermes Agent Community"
 LABEL version="0.10.0"
 LABEL description="Hermes Agent v0.10.0 with Web UI on Hugging Face Spaces"
 
+# 可通过 --build-arg HERMES_WEB_UI_VERSION=0.6.0 覆盖
+# ARG HERMES_WEB_UI_VERSION=0.6.3
+# ARG HERMES_WEB_UI_VERSION=0.6.7
+ARG HERMES_WEB_UI_VERSION=latest
+
 # ==================== 环境变量 ====================
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
@@ -20,12 +25,12 @@ ENV HERMES_BIN=/usr/local/bin/hermes
 
 # ==================== 系统依赖 ====================
 RUN apt-get update && apt-get install -y \
-    build-essential \
     ffmpeg \
     git \
     curl \
     unzip \
     ca-certificates \
+    make gcc g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # ==================== Node.js v23 ====================
@@ -59,7 +64,7 @@ RUN echo "Installing Bun runtime" \
 # 避免依赖 Web UI 技能安装（可能只下载编译产物而丢失 .ts 源文件）
 RUN mkdir -p /home/appuser/.baoyu-skills/baoyu-imagine && \
     git clone --depth 1 https://github.com/JimLiu/baoyu-skills.git /tmp/baoyu-skills && \
-    cp -r /tmp/baoyu-skills/skills/baoyu-imagine/scripts \
+    cp -r /tmp/baoyu-skills/skills/baoyu-image-gen/scripts \
           /home/appuser/.baoyu-skills/baoyu-imagine/scripts && \
     rm -rf /tmp/baoyu-skills
 
@@ -70,28 +75,27 @@ RUN curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_a
 
 # ==================== Python 依赖 ====================
 COPY requirements.txt /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --prefer-binary -r /tmp/requirements.txt
 
 # ==================== Hermes Agent ====================
 # 克隆并安装 Hermes Agent（不再构建内置 Dashboard 前端，由 hermes-web-ui 替代）
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
-    pip install --no-cache-dir /tmp/hermes-agent[all] && \
-    rm -rf /tmp/hermes-agent /root/.cache/pip
+# 将源码保留在 /usr/local/lib/hermes-agent 目录下，以便 agent-bridge 和 run_agent.py 能正确集成与相互调用
+RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /usr/local/lib/hermes-agent && \
+    pip install --no-cache-dir --prefer-binary /usr/local/lib/hermes-agent[all]
 
 # Playwright 浏览器（Hermes Agent 工具调用需要）
-RUN npx playwright install chromium --with-deps --only-shell
+RUN npx playwright install chromium --with-deps --only-shell && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # ==================== Hermes Web UI ====================
-# 克隆、构建、精简 hermes-web-ui（单层，避免中间态占用空间）
-RUN git clone --depth 1 https://github.com/EKKOLearnAI/hermes-web-ui.git /tmp/hermes-web-ui && \
-    cd /tmp/hermes-web-ui && \
-    npm pkg delete scripts.prepare && \
-    npm install && \
-    npm run build && \
-    npm prune --omit=dev && \
-    mkdir -p /opt/hermes-web-ui && \
-    cp -r dist node_modules package.json /opt/hermes-web-ui/ && \
-    rm -rf /tmp/hermes-web-ui /root/.npm
+# 直接安装 npm 发布的预构建包，彻底避免从源码克隆、安装 devDependencies 和编译（节省数分钟及大量 CPU/内存资源）
+# npm 包已包含 dist/(server|client|website) 以及 agent-bridge/hermes_bridge.py
+RUN mkdir -p /opt/hermes-web-ui && cd /opt/hermes-web-ui && \
+    npm init -y && \
+    npm install hermes-web-ui@${HERMES_WEB_UI_VERSION} --no-audit --no-fund --loglevel=error && \
+    ln -sf node_modules/hermes-web-ui/dist dist && \
+    ln -sf node_modules/hermes-web-ui/package.json package.json && \
+    rm -rf /root/.npm /opt/hermes-web-ui/package-lock.json
 
 # ==================== 应用代码 ====================
 WORKDIR /app
@@ -110,7 +114,8 @@ RUN mkdir -p /data/.hermes /data/.hermes-web-ui /app/logs /home/appuser/.hermes-
 RUN useradd -m -u 1000 appuser && \
     ln -sf /data/.hermes /home/appuser/.hermes && \
     mkdir -p /home/appuser/.cache && \
-    chown -R appuser:appuser /data /opt/hermes-web-ui /app /home/appuser
+    chown -R appuser:appuser /data /opt/hermes-web-ui /app /home/appuser /usr/local/lib/hermes-agent && \
+    chown appuser:appuser /usr/local/bin
 
 USER appuser
 
@@ -127,3 +132,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD curl -f http://localhost:7860/health || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]
+
